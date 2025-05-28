@@ -1,0 +1,408 @@
+         
+---
+title: "In-Class Project: ChIP-Seq Peak Calling with MACS3"
+author: "Payal Priyadarshini"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+  toc: true
+  number_sections: true
+  latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+# Knitr options for code chunk display
+knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = TRUE, fig.width = 8, fig.height = 6) # Adjusted fig size
+```
+
+## Introduction
+
+Welcome! This project will guide you through the process of identifying potential protein binding sites or histone modifications in the genome using **simulated** ChIP-Seq data designed to have a strong signal. We will use a software called MACS3 (Model-based Analysis of ChIP-Seq version 3), a super useful tool for peak calling and several other types of analysis of ChIP-Seq data. 
+
+   In this exercise, you will:
+1.  Generate simulated paired-end ChIP-Seq data with stronger enrichment signals.
+2.  Execute the **MACS3** peak caller on this simulated data from within an R script, attempting default model building.
+3.  Load the resulting `.narrowPeak` file into R using `rtracklayer` (if peaks were found).
+4.  Briefly inspect the `GRanges` object containing the peaks and visualize some basic properties (histograms).
+5.  Visualize the raw read coverage for treatment and control alongside the called peaks in a specific genomic region using `Gviz`.
+
+Dataset: We will generate simulated BED files representing paired-end reads:
+- Treatment: Simulates reads from a ChIP experiment with strong enrichment at specific locations.
+- Control: Simulates background reads.
+- Format: Paired-end reads in BED format.
+
+**Paired-End Data:** Our simulated data represents paired-end sequencing. MACS3 will attempt to infer the fragment size distribution from the data itself.
+
+**Prerequisite:** You **must** have MACS3 installed and accessible from your command line *before* proceeding. Test with `macs3 --version` in your terminal.
+
+## 1. Setup R Environment
+
+Simply run the code chunk below to install to ensure the necessary libraries for the rest of this script :)
+* `dplyr`: Data manipulation.
+* `rtracklayer`: Import BED files and MACS3 peak results
+* `GenomicRanges`: Provides core infrastructure for genomic data
+* `Gviz`: Required for plotting genomic tracks (coverage, peaks)
+
+```{r install_packages, eval=FALSE}
+if (!requireNamespace("dplyr", quietly = TRUE)) install.packages("dplyr")
+if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+if (!requireNamespace("rtracklayer", quietly = TRUE)) BiocManager::install("rtracklayer")
+# Gviz has many dependencies, installation might take a while
+if (!requireNamespace("Gviz", quietly = TRUE)) BiocManager::install("Gviz")
+# GenomicRanges is usually installed as a dependency, but good to be explicit
+if (!requireNamespace("GenomicRanges", quietly = TRUE)) BiocManager::install("GenomicRanges")
+```
+
+```{r load_packages}
+# Load the libraries for this session
+library(dplyr)
+library(rtracklayer)
+library(GenomicRanges)
+library(Gviz)
+```
+
+## 2. Simulate Paired-End ChIP-Seq Data
+
+Normally, the callpeaks function of MACS3 would be used on .bam or .bed files. However, these files are quite large,
+so in order to save our computers from the torture of a gigantic download and prevent the need for dealing with the FU servers,
+we decided to simulate paired-end ChIP-Seq Data. If you are interested, there is information in the "Simulation_Algo.txt" file 
+in this project's directory that explains the overall logic behind the simulation. 
+
+Run the code chunk below to generate the simulated ChIP-Seq data and answer the following questions:
+
+1. If we were to use real ChIP-Seq data in this analysis, where could we normally find such data (e.g., which website/database)?
+2. Which file formats are passable to the callpeaks function of MACS3?
+3. What are the important data quality control measures one should take before attempting to call peaks? 
+
+```{r simulate_data_strong}
+# Sim params
+set.seed(456)
+n_pairs_treatment <- 8000
+n_pairs_control <- 1500
+read_length <- 50
+fragment_mean_size <- 200
+fragment_sd_size <- 25
+genome_size <- 1e6
+chr_name <- "chrSim"
+
+# Helper function to generate reads
+generate_read_pair <- function(pair_id, chr, center, frag_len, read_len, strand_choice = c("+", "-")) {
+  frag_start <- max(0, round(center - frag_len / 2))
+  frag_end <- frag_start + frag_len
+  if (sample(strand_choice, 1) == "+") {
+    read1_start <- frag_start
+    read1_end <- frag_start + read_len
+    read2_start <- frag_end - read_len
+    read2_end <- frag_end
+    strand1 <- "+"
+    strand2 <- "-"
+  } else {
+    read1_start <- frag_end - read_len
+    read1_end <- frag_end
+    read2_start <- frag_start
+    read2_end <- frag_start + read_len
+    strand1 <- "-"; strand2 <- "+"
+  }
+  read1_start <- max(0, read1_start)
+  read1_end <- min(genome_size, read1_end)
+  read2_start <- max(0, read2_start)
+  read2_end <- min(genome_size, read2_end)
+  if (read1_start >= read1_end) read1_end <- read1_start + 1
+  if (read2_start >= read2_end) read2_end <- read2_start + 1
+  read1 <- data.frame(chr = chr, start = read1_start, end = read1_end,
+                      name = paste0("sim_read_", pair_id, "/1"), score = 0, strand = strand1)
+  read2 <- data.frame(chr = chr, start = read2_start, end = read2_end,
+                      name = paste0("sim_read_", pair_id, "/2"), score = 0, strand = strand2)
+  return(rbind(read1, read2))
+}
+
+# Generate treatment reads
+hotspot_centers <- round(genome_size * c(0.15, 0.35, 0.65, 0.85))
+n_hotspots <- length(hotspot_centers)
+n_per_hotspot <- round(n_pairs_treatment * 0.90 / n_hotspots)
+n_background <- n_pairs_treatment - (n_per_hotspot * n_hotspots)
+hotspot_sd <- fragment_mean_size * 0.5
+
+centers_treatment <- c(
+  unlist(lapply(hotspot_centers, function(center) {
+    rnorm(n_per_hotspot, mean = center, sd = hotspot_sd)
+  })),
+  runif(n_background, min = 0, max = genome_size)
+)
+centers_treatment <- pmax(0, pmin(genome_size, round(centers_treatment)))
+
+frag_lengths_treatment <- round(rnorm(n_pairs_treatment, mean = fragment_mean_size, sd = fragment_sd_size))
+frag_lengths_treatment[frag_lengths_treatment < read_length * 2] <- read_length * 2
+
+cat("Generating treatment reads...\n")
+treatment_reads_list <- lapply(1:n_pairs_treatment, function(i) {
+  generate_read_pair(pair_id = i, chr = chr_name, center = centers_treatment[i],
+                     frag_len = frag_lengths_treatment[i], read_len = read_length)
+})
+treatment_bed <- bind_rows(treatment_reads_list) %>% arrange(chr, start)
+
+# Generate control reads
+cat("Generating control reads...\n")
+centers_control <- round(runif(n_pairs_control, min = 0, max = genome_size))
+centers_control <- pmax(0, pmin(genome_size, centers_control))
+
+frag_lengths_control <- round(rnorm(n_pairs_control, mean = fragment_mean_size, sd = fragment_sd_size))
+frag_lengths_control[frag_lengths_control < read_length * 2] <- read_length * 2
+
+control_reads_list <- lapply(1:n_pairs_control, function(i) {
+  generate_read_pair(pair_id = i + n_pairs_treatment, chr = chr_name, center = centers_control[i],
+                     frag_len = frag_lengths_control[i], read_len = read_length)
+})
+control_bed <- bind_rows(control_reads_list) %>% arrange(chr, start)
+
+# Write BED files
+sim_input_dir <- "macs_simulated_input"
+if (!dir.exists(sim_input_dir)) dir.create(sim_input_dir)
+treatment_bed_file <- file.path(sim_input_dir, "treatment_strong.bed")
+control_bed_file <- file.path(sim_input_dir, "control_strong.bed")
+
+cat("Writing BED files...\n")
+write.table(treatment_bed, file = treatment_bed_file, sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE)
+write.table(control_bed, file = control_bed_file, sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE)
+
+cat("Simulated BED files created:\n")
+cat("- Treatment:", treatment_bed_file, "\n")
+cat("- Control:", control_bed_file, "\n")
+
+if (!file.exists(treatment_bed_file) || file.info(treatment_bed_file)$size == 0) stop("Failed to create or write non-empty treatment BED file.")
+if (!file.exists(control_bed_file) || file.info(control_bed_file)$size == 0) stop("Failed to create or write non-empty control BED file.")
+cat("BED files written successfully.\n")
+```
+## 3. Run MACS3 on Simulated Data
+
+Now we construct and execute the `macs3 callpeak` command using the simulated BED files. We will let MACS3 attempt to build its model.
+Edit the code below where indicated.
+
+```{r run_macs3_simulated}
+# Define output directory for MACS3 results
+macs3_output_dir <- "macs3_results_simulated"
+if (!dir.exists(macs3_output_dir)) dir.create(macs3_output_dir)
+
+# Define the output name prefix
+output_name <- "simulated_run"
+
+# TASK 3.1
+# --------------------------------------------------------------------------
+# Construct the MACS3 command arguments for input into the system2() function 
+# for command line operations from R. 
+# Hints: 
+# 1. Appropriate genome size is "1e6".
+# 2. Files containing simulated data are in .bed format.
+# 3. The output directory for the MACS3 peak calling is specified in the variable macs3_output_dir.
+# 4. The output name for the MACS3 peak calling output file is specified in the variable output_name.
+# 5. A good default q-value is 0.05. 
+# 6. In our instance, we would like to bypass building a shifting model for 
+#    determining the shift of the reads towards the center.
+   macs3_args <- c(
+  "callpeak",
+  "-t", treatment_bed_file,
+  "-c", control_bed_file,
+  "-f", "BED",
+  "-g", "1e6",
+  "-n", chr_name,
+  "--outdir", "/Users/payalpriyadarshini/Documents/Data_Science_2nd_sem/macs3_output_dir",
+  "-q", "0.05",
+  "--nomodel"
+)
+  
+# TASK 3.2
+# --------------------------------------------------------------------------    
+# Execute MACS3:
+# Edit the value of macs3_executable (below) to be the full file path to your MACS3 install. 
+# This can be found by calling "which macs3" in your Terminal. 
+macs3_executable <- "/opt/anaconda3/bin/macs3" # <-- EDIT THIS LINE with full path if needed
+# --------------------------------------------------------------------------    
+
+cat("Running MACS3 on simulated data...\n")
+full_command_string <- paste(macs3_executable, paste(macs3_args, collapse = " "))
+
+# TASK 3.3
+# --------------------------------------------------------------------------
+# Evoke a command line operation (using system2()) to call MACS3's callpeaks
+# function. 
+# Hint: The macs3_executable variable is used as the first term in a MACS3 command line call
+# Example: In "macs3 -f arg1 -n arg2 ..." macs3 (or its full path) is stored in macs3_executable above. 
+
+start_time <- Sys.time()
+macs3_output <- system2(macs3_executable, args = macs3_args)      # YOUR CODE HERE
+# --------------------------------------------------------------------------    
+end_time <- Sys.time()
+duration <- end_time - start_time
+   
+
+cat("\n---------- MACS3 Output Log Start ----------\n")
+#cat(paste(macs3_output, collapse = "\n"), "\n")
+cat("---------- MACS3 Output Log End ----------\n\n")
+cat("MACS3 run duration:", duration, "seconds\n\n")
+# Check if output files were created
+expected_peak_file <- file.path(macs3_output_dir, paste0(output_name, "_peaks.narrowPeak"))
+expected_xls_file <- file.path(macs3_output_dir, paste0(output_name, "_peaks.xls"))
+```
+
+## 4. Load and Explore MACS3 Peaks
+
+Assuming MACS3 completed successfully and generated a `.narrowPeak` file, we load it into R.
+Please also answer the following questions: 
+
+1. 
+
+```{r load_peaks_simulated}
+# Path to the narrowPeak file generated by MACS3
+narrowPeak_file <- file.path("/Users/payalpriyadarshini/Documents/Data_Science_2nd_sem/macs3_output_dir/chrSim_peaks.narrowPeak")
+peaks <- NULL # Initialize peaks object
+
+# TASK 4
+# -------------------------------------------------------------------------- 
+# Import the narrowPeak file (narrowPeak_file) generated by MACS3 using 
+# the rtracklayer library. 
+
+if (file.exists(narrowPeak_file)) {
+  cat("Importing peaks from:", narrowPeak_file, "...\n")
+  peaks <- import(narrowPeak_file) # YOUR CODE HERE
+  if (!is.null(peaks)) {
+      cat("\nSuccessfully imported", length(peaks), "peaks.\n")
+      cat("\nPeaks object summary (first 6):\n")
+      show(head(peaks))
+  } else {
+      cat("\nPeak import failed despite file existing.\n")
+  }
+} else {
+  cat("\nCould not find the MACS3 narrowPeak file to import:", narrowPeak_file, "\n")
+  cat("Check the MACS3 log and the warning messages from the previous chunk.\n")
+}
+```
+
+## 5. Basic Peak Visualization (Optional Histograms)
+
+This code visualizes the distribution of peak widths and scores.
+Simply run the code below to get the output, no coding required for you :)
+
+```{r visualize_peaks_simulated}
+if (!is.null(peaks) && length(peaks) > 0) {
+  peak_widths <- width(peaks)
+  reasonable_widths <- peak_widths[peak_widths < quantile(peak_widths, 0.99, na.rm = TRUE)]
+  hist(reasonable_widths, breaks = 50, main = "Distribution of Peak Widths (up to 99th percentile)", xlab = "Peak Width (bp)", col = "lightblue")
+
+  peak_scores <- mcols(peaks)$score
+  hist(peak_scores, breaks = 50, main = "Distribution of Peak Scores", xlab = "Peak Score (-log10(qvalue) scaled)", col = "lightgreen")
+
+  cat("\nSummary statistics for loaded peaks:\n")
+  cat("Widths:\n"); print(summary(peak_widths))
+  cat("\nScores:\n"); print(summary(peak_scores))
+} else {
+  cat("\nNo peaks loaded, skipping histogram visualization.\n")
+}
+```
+
+## 6. Visualize Read Coverage and Peaks
+
+The code below generates a nice plot of where the peaks are located throughout the genome. 
+Again, no coding needed as a reward for your hard work in the earlier tasks :)
+However, please answer the following questions: 
+
+1. Explain the difference in patterns between the control and treatment samples. 
+2. What would a control sample with significant peaks suggest about your prior ChIP-Seq experiment?
+
+```{r plot_coverage}
+# Check if we have the necessary inputs for plotting
+if (exists("treatment_bed_file") && file.exists(treatment_bed_file) &&
+    exists("control_bed_file") && file.exists(control_bed_file) &&
+    exists("peaks") && !is.null(peaks) && length(peaks) > 0) {
+
+  cat("\nGenerating coverage plot...\n")
+
+  # Define region of interest
+  plot_center <- hotspot_centers[1]
+  plot_window <- 15000
+  plot_start <- max(0, plot_center - plot_window / 2)
+  plot_end <- min(genome_size, plot_center + plot_window / 2)
+  plot_chr <- chr_name
+
+  cat("Plotting region:", plot_chr, ":", plot_start, "-", plot_end, "\n")
+
+  # Import BED files as GRanges
+  cat("Importing BED files for coverage calculation...\n")
+  gr_treatment <- tryCatch(import(treatment_bed_file, format = "bed"), error=function(e) {message("Error importing treatment BED: ",e$message); NULL})
+  gr_control <- tryCatch(import(control_bed_file, format = "bed"), error=function(e) {message("Error importing control BED: ",e$message); NULL})
+
+  if(is.null(gr_treatment) || is.null(gr_control)) {
+      cat("Could not import BED files, skipping coverage plot.\n")
+  } else {
+      # Calculate coverage 
+      cat("Calculating coverage...\n")
+      cov_treatment <- coverage(gr_treatment)[[plot_chr]]
+      cov_control <- coverage(gr_control)[[plot_chr]]
+
+      # Get data for ylim calculation
+      # Ensure region indices are valid before subsetting coverage vectors
+      max_coord_treat <- length(cov_treatment)
+      max_coord_ctrl <- length(cov_control)
+      valid_indices_treat <- seq(max(1, plot_start), min(max_coord_treat, plot_end))
+      valid_indices_ctrl <- seq(max(1, plot_start), min(max_coord_ctrl, plot_end))
+
+      # Handle cases where the plot region might be outside the actual data range
+      if(length(valid_indices_treat) == 0 || length(valid_indices_ctrl) == 0) {
+          cat("Plotting region is outside the range of the coverage data. Skipping plot.\n")
+      } else {
+          # Extract numeric coverage data for the plot region
+          plot_data_treat <- as.numeric(cov_treatment[valid_indices_treat])
+          plot_data_ctrl <- as.numeric(cov_control[valid_indices_ctrl])
+
+          # Calculate max coverage for ylim *from the numeric vectors*
+          max_cov <- max(max(plot_data_treat), max(plot_data_ctrl), 1) # Ensure ylim >= 1
+
+          # --- Create Gviz Tracks ---
+          gtrack <- GenomeAxisTrack()
+
+          dtrack_treatment <- DataTrack(start = valid_indices_treat, width = 1,
+                                        chromosome = plot_chr, genome = "simG",
+                                        data = plot_data_treat, # Use pre-calculated vector
+                                        type = "histogram", name = "Treatment Cov",
+                                        background.title = "darkblue", col.histogram = "darkblue", fill.histogram = "darkblue")
+
+          dtrack_control <- DataTrack(start = valid_indices_ctrl, width = 1,
+                                      chromosome = plot_chr, genome = "simG",
+                                      data = plot_data_ctrl, # Use pre-calculated vector
+                                      type = "histogram", name = "Control Cov",
+                                      background.title = "darkred", col.histogram = "darkred", fill.histogram = "darkred")
+
+          atrack_peaks <- AnnotationTrack(peaks, name = "MACS3 Peaks",
+                                          chromosome = plot_chr,
+                                          background.title = "darkgreen", fill = "darkgreen", col="darkgreen",
+                                          shape="box")
+
+          # --- Plot Tracks ---
+          cat("Plotting tracks...\n")
+          plotTracks(list(gtrack, dtrack_treatment, dtrack_control, atrack_peaks),
+                     from = plot_start, to = plot_end, chromosome = plot_chr,
+                     main = paste("Read Coverage and MACS3 Peaks around Hotspot 1"),
+                     ylim = c(0, max_cov * 1.1), # Use pre-calculated max_cov
+                     cex.main = 1
+                     )
+          cat("Coverage plot generated.\n")
+      } # End check for valid indices
+  } # End if BED files imported
+
+} else {
+  cat("\nSkipping coverage plot because peaks were not loaded or BED files are missing.\n")
+  if (!exists("peaks")) cat(" -> Reason: 'peaks' object does not exist.\n")
+  else if (is.null(peaks)) cat(" -> Reason: 'peaks' object is NULL.\n")
+  else if (length(peaks) == 0) cat(" -> Reason: 'peaks' object is empty (length is 0).\n")
+  if (!exists("treatment_bed_file") || !file.exists(treatment_bed_file)) cat(" -> Reason: Treatment BED file path/file invalid.\n")
+  if (!exists("control_bed_file") || !file.exists(control_bed_file)) cat(" -> Reason: Control BED file path/file invalid.\n")
+}
+```
+## Conclusion
+
+In this exercise, you have:
+1.  Generated simulated paired-end ChIP-Seq data with stronger enrichment signals.
+2.  Executed the **MACS3** peak caller on this simulated data from within an R script, attempting default model building.
+3.  Loaded the resulting `.narrowPeak` file into R using `rtracklayer` (if peaks were found).
+4.  Briefly inspected the `GRanges` object containing the peaks and visualized some basic properties (histograms).
+5.  Visualized the raw read coverage for treatment and control alongside the called peaks in a specific genomic region using `Gviz`.
+````
