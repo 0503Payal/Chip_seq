@@ -17,31 +17,24 @@ knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = TRUE, fig.width = 8
 
 ## Introduction
 
-Welcome! This project will guide you through the process of identifying potential protein binding sites or histone modifications in the genome using **simulated** ChIP-Seq data designed to have a strong signal. We will use a software called MACS3 (Model-based Analysis of ChIP-Seq version 3), a super useful tool for peak calling and several other types of analysis of ChIP-Seq data. 
+This project is a process of identifying potential protein binding sites or histone modifications in the genome using **simulated** ChIP-Seq data designed to have a strong signal. We will use a software called MACS3 (Model-based Analysis of ChIP-Seq version 3), a super useful tool for peak calling and several other types of analysis of ChIP-Seq data. 
 
-   In this exercise, you will:
+Steps included:
 1.  Generate simulated paired-end ChIP-Seq data with stronger enrichment signals.
 2.  Execute the **MACS3** peak caller on this simulated data from within an R script, attempting default model building.
 3.  Load the resulting `.narrowPeak` file into R using `rtracklayer` (if peaks were found).
 4.  Briefly inspect the `GRanges` object containing the peaks and visualize some basic properties (histograms).
 5.  Visualize the raw read coverage for treatment and control alongside the called peaks in a specific genomic region using `Gviz`.
 
-Dataset: We will generate simulated BED files representing paired-end reads:
+Dataset: generated simulated BED files representing paired-end reads:
 - Treatment: Simulates reads from a ChIP experiment with strong enrichment at specific locations.
 - Control: Simulates background reads.
 - Format: Paired-end reads in BED format.
 
-**Paired-End Data:** Our simulated data represents paired-end sequencing. MACS3 will attempt to infer the fragment size distribution from the data itself.
-
-**Prerequisite:** You **must** have MACS3 installed and accessible from your command line *before* proceeding. Test with `macs3 --version` in your terminal.
+**Paired-End Data:**  simulated data represents paired-end sequencing. MACS3 will attempt to infer the fragment size distribution from the data itself.
 
 ## 1. Setup R Environment
 
-Simply run the code chunk below to install to ensure the necessary libraries for the rest of this script :)
-* `dplyr`: Data manipulation.
-* `rtracklayer`: Import BED files and MACS3 peak results
-* `GenomicRanges`: Provides core infrastructure for genomic data
-* `Gviz`: Required for plotting genomic tracks (coverage, peaks)
 
 ```{r install_packages, eval=FALSE}
 if (!requireNamespace("dplyr", quietly = TRUE)) install.packages("dplyr")
@@ -54,7 +47,7 @@ if (!requireNamespace("GenomicRanges", quietly = TRUE)) BiocManager::install("Ge
 ```
 
 ```{r load_packages}
-# Load the libraries for this session
+# Load the libraries 
 library(dplyr)
 library(rtracklayer)
 library(GenomicRanges)
@@ -64,15 +57,9 @@ library(Gviz)
 ## 2. Simulate Paired-End ChIP-Seq Data
 
 Normally, the callpeaks function of MACS3 would be used on .bam or .bed files. However, these files are quite large,
-so in order to save our computers from the torture of a gigantic download and prevent the need for dealing with the FU servers,
-we decided to simulate paired-end ChIP-Seq Data. If you are interested, there is information in the "Simulation_Algo.txt" file 
-in this project's directory that explains the overall logic behind the simulation. 
+so in order to save the computers from the torture of a gigantic download and prevent the need for dealing with the FU servers,
+we decided to simulate paired-end ChIP-Seq Data. 
 
-Run the code chunk below to generate the simulated ChIP-Seq data and answer the following questions:
-
-1. If we were to use real ChIP-Seq data in this analysis, where could we normally find such data (e.g., which website/database)?
-2. Which file formats are passable to the callpeaks function of MACS3?
-3. What are the important data quality control measures one should take before attempting to call peaks? 
 
 ```{r simulate_data_strong}
 # Sim params
@@ -175,28 +162,19 @@ cat("BED files written successfully.\n")
 ```
 ## 3. Run MACS3 on Simulated Data
 
-Now we construct and execute the `macs3 callpeak` command using the simulated BED files. We will let MACS3 attempt to build its model.
-Edit the code below where indicated.
+Now we construct and execute the `macs3 callpeak` command using the simulated BED files, let MACS3 attempt to build its model.
 
 ```{r run_macs3_simulated}
 # Define output directory for MACS3 results
 macs3_output_dir <- "macs3_results_simulated"
 if (!dir.exists(macs3_output_dir)) dir.create(macs3_output_dir)
 
-# Define the output name prefix
 output_name <- "simulated_run"
 
-# TASK 3.1
 # --------------------------------------------------------------------------
-# Construct the MACS3 command arguments for input into the system2() function 
-# for command line operations from R. 
-# Hints: 
-# 1. Appropriate genome size is "1e6".
-# 2. Files containing simulated data are in .bed format.
-# 3. The output directory for the MACS3 peak calling is specified in the variable macs3_output_dir.
-# 4. The output name for the MACS3 peak calling output file is specified in the variable output_name.
-# 5. A good default q-value is 0.05. 
-# 6. In our instance, we would like to bypass building a shifting model for 
+# Constructing the MACS3 command arguments for input into the system2() function 
+
+
 #    determining the shift of the reads towards the center.
    macs3_args <- c(
   "callpeak",
@@ -210,10 +188,9 @@ output_name <- "simulated_run"
   "--nomodel"
 )
   
-# TASK 3.2
+
 # --------------------------------------------------------------------------    
 # Execute MACS3:
-# Edit the value of macs3_executable (below) to be the full file path to your MACS3 install. 
 # This can be found by calling "which macs3" in your Terminal. 
 macs3_executable <- "/opt/anaconda3/bin/macs3" # <-- EDIT THIS LINE with full path if needed
 # --------------------------------------------------------------------------    
@@ -221,7 +198,6 @@ macs3_executable <- "/opt/anaconda3/bin/macs3" # <-- EDIT THIS LINE with full pa
 cat("Running MACS3 on simulated data...\n")
 full_command_string <- paste(macs3_executable, paste(macs3_args, collapse = " "))
 
-# TASK 3.3
 # --------------------------------------------------------------------------
 # Evoke a command line operation (using system2()) to call MACS3's callpeaks
 # function. 
@@ -244,7 +220,7 @@ expected_peak_file <- file.path(macs3_output_dir, paste0(output_name, "_peaks.na
 expected_xls_file <- file.path(macs3_output_dir, paste0(output_name, "_peaks.xls"))
 ```
 
-## 4. Load and Explore MACS3 Peaks
+## 4. Loading and Exploring MACS3 Peaks
 
 Assuming MACS3 completed successfully and generated a `.narrowPeak` file, we load it into R.
 Please also answer the following questions: 
@@ -256,7 +232,7 @@ Please also answer the following questions:
 narrowPeak_file <- file.path("/Users/payalpriyadarshini/Documents/Data_Science_2nd_sem/macs3_output_dir/chrSim_peaks.narrowPeak")
 peaks <- NULL # Initialize peaks object
 
-# TASK 4
+
 # -------------------------------------------------------------------------- 
 # Import the narrowPeak file (narrowPeak_file) generated by MACS3 using 
 # the rtracklayer library. 
@@ -277,8 +253,7 @@ if (file.exists(narrowPeak_file)) {
 }
 ```
 
-## 5. Basic Peak Visualization (Optional Histograms)
-
+## 5. Basic Peak Visualization 
 This code visualizes the distribution of peak widths and scores.
 Simply run the code below to get the output, no coding required for you :)
 
@@ -397,12 +372,5 @@ if (exists("treatment_bed_file") && file.exists(treatment_bed_file) &&
   if (!exists("control_bed_file") || !file.exists(control_bed_file)) cat(" -> Reason: Control BED file path/file invalid.\n")
 }
 ```
-## Conclusion
 
-In this exercise, you have:
-1.  Generated simulated paired-end ChIP-Seq data with stronger enrichment signals.
-2.  Executed the **MACS3** peak caller on this simulated data from within an R script, attempting default model building.
-3.  Loaded the resulting `.narrowPeak` file into R using `rtracklayer` (if peaks were found).
-4.  Briefly inspected the `GRanges` object containing the peaks and visualized some basic properties (histograms).
-5.  Visualized the raw read coverage for treatment and control alongside the called peaks in a specific genomic region using `Gviz`.
-````
+
